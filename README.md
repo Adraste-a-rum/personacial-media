@@ -6,37 +6,144 @@
 かつ連合も可能で、Misskeyのように多機能、かつDiscordライクな操作感が
 得られるサービス。
 
-### 短期目標(PoC的MVC): ローカルファースト個人メモ
-- CRDTを用いたローカルファーストなデータ層（Automergeを検討中）
+---
+
+## フェーズ別ロードマップ
+
+### Phase 1（現在）: ローカルファースト個人メモ（MVP）
+
 - サーバ不要。アプリをインストールして起動すれば即利用可能
-- 複数端末間はP2P同期
+- CRDTを用いたローカルファーストなデータ層（Automerge）
+- 1端末で完結する手帳として動作することをゴールとする
 
-### 中期目標: 小規模共有・連合
+**実装スコープ**
 
+- [ ] 投稿の作成・表示・削除（ローカルのみ）
+- [ ] MFMテキストのパース・レンダリング（`@misskey-dev/mfm-js` を流用）
+- [ ] IndexedDBへのAutomergeドキュメント永続化（Automerge-Repo + IndexedDB adapter）
+- [ ] カスタム絵文字の登録・表示（絵文字一覧をAutomergeのMapで管理）
+
+### Phase 2: 複数端末P2P同期
+
+- 複数端末間をP2Pで同期（Automerge-Repoのネットワーク層を活用）
 - サーバの有無を選択できる
-  - 即ち、P2Pで同期を回すのか、ひとつのサーバに依存させるのかを選べる
+  - P2Pで同期を回すか、ひとつの中継サーバに依存させるかを選べる
+
+### Phase 3: 小規模共有・連合
+
 - AT Protocol的な署名付きリポジトリを用いた連合機能を検討
 - ActivityPubとのブリッジは将来的な課題
 
-## 技術構成（検討中）
+---
 
-- フロントエンド: 未定（React / Vue など）
-- 同期層: Automerge（CRDT）
-- 連合層: AT Protocol（将来）
-
-### <ruby><rp>|</rp>階層<rp>《</rp><rt>レイヤー</rt><rp>》</rp></ruby>的設計
+## アーキテクチャ
 
 ```
 ┌───────────────────────────────────┐
-│           UI 層                   │  ← フロントエンド（React / Vue）
+│           UI 層                   │  <- フロントエンド（React + Vite）
 ├───────────────────────────────────┤
-│        ビジネスロジック層           │  ← 投稿操作・検索・タイムライン生成
+│        ビジネスロジック層           │  <- 投稿操作・検索・タイムライン生成
 ├───────────────────────────────────┤
-│         同期・ストレージ層          │  ← Automerge（CRDT）+ IndexedDB
+│         同期・ストレージ層          │  <- Automerge（CRDT）+ IndexedDB
 ├───────────────────────────────────┤
-│     トランスポート層（P2P）         │  ← WebRTC / LAN / Bluetooth（将来）
+│     トランスポート層（P2P）         │  <- WebRTC / LAN（Phase 2以降）
 ├───────────────────────────────────┤
-│     連合層（Phase 2以降）          │  ← AT Protocol / ActivityPubブリッジ
+│     連合層（Phase 3以降）          │  <- AT Protocol / ActivityPubブリッジ
 └───────────────────────────────────┘
-
 ```
+
+---
+
+## データモデル
+
+### Automergeドキュメントの粒度方針
+
+「**一投稿一ドキュメント + 全体インデックスドキュメント**」を採用する。
+
+- 増分同期が軽量になる
+- AT Protocolの「各レコードを独立したエントリとして扱う」設計と親和性が高く、Phase 3への移行が容易
+
+### 投稿ドキュメント（Post）
+
+```jsonc
+{
+  "id": "ImmutableString",           // UUIDv7（時刻順ソートに有利）
+  "authorId": "ImmutableString",     // 作者識別子（Phase 1はデバイスローカルなUUID）
+  "content": "Text",                 // AutomergeのText型 -> MFMパーサを通してレンダリング
+  "contentType": "ImmutableString",  // "mfm" | "plaintext"
+  "attachments": [                   // List型
+    {
+      "type": "ImmutableString",     // "image" | "video" | "file"
+      "blobId": "ImmutableString"    // コンテンツアドレス（SHA-256ハッシュ）
+    }
+  ],
+  "replyTo": "ImmutableString | null",     // 返信先Post ID
+  "threadRoot": "ImmutableString | null",  // スレッド根Post ID
+  "createdAt": "Timestamp",
+  "editedAt": "Timestamp | null",
+  "visibility": "ImmutableString"    // "private" | "local" | "public"
+}
+```
+
+### リアクションドキュメント（Reaction）
+
+リアクションは投稿ドキュメントに埋め込まず、独立したドキュメントとして管理する。
+（複数端末からの同時リアクションによる競合を避けるため）
+
+```jsonc
+{
+  "targetPostId": "ImmutableString",
+  "reactions": {
+    "[emoji_code]": { "[userId]": true }
+    // キーがemojiCode、値がauthorId -> trueのMap
+  }
+}
+```
+
+### インデックスドキュメント（Timeline）
+
+全投稿のIDと作成時刻を保持するドキュメント。タイムライン表示に使用。
+
+```jsonc
+{
+  "posts": [
+    { "id": "ImmutableString", "createdAt": "Timestamp" }
+    // append-only
+  ]
+}
+```
+
+### 同期競合の解決方針
+
+- テキスト本文：AutomergeのText型（Peritext CRDT）が自動マージ
+- その他のフィールド：Phase 1ではLast-Write-Wins（最後に編集したデバイスを優先）
+- MFMの意味的整合性はアプリ層での確認が将来的に必要
+
+---
+
+## 技術スタック
+
+| 層 | 技術 | 備考 |
+| --- | --- | --- |
+| フロントエンド | React + Vite + TypeScript | Automergeの公式サンプルがReact中心 |
+| CRDTライブラリ | `@automerge/automerge` + `@automerge/automerge-repo` | StorageとNetworkを抽象化 |
+| 永続化 | IndexedDB（Automerge-Repo標準アダプタ） | ブラウザ・Electron・Capacitorで共通利用可 |
+| MFMパーサ | `@misskey-dev/mfm-js` | Misskey公式パーサをnpmから直接利用 |
+| モバイル対応 | Capacitor（将来） | WebアプリをそのままAndroid/iOSアプリ化 |
+| 連合層 | AT Protocol（Phase 3以降） | |
+
+---
+
+## 未解決の設計課題
+
+1. **ユーザ識別子の設計**
+   - Phase 1はデバイスローカルなUUIDで代替
+   - Phase 2以降で複数デバイスをまたいだ同一人物の識別が必要になる
+   - AT ProtocolのDID（分散識別子）が将来的な答えの候補
+
+2. **添付ファイルのストレージ**
+   - テキストはAutomergeで管理するが、画像・動画の実体はCRDTではなく**コンテンツアドレス型ストレージ**（SHA-256ハッシュでファイルを参照する方式）で別管理するのが定番
+
+3. **スレッドとチャンネルの共存**
+   - Misskeyライクな「タイムライン投稿」とDiscordライクな「チャンネル内チャット」をどう統一的に表現するか
+   - Roomyの `Space -> Channel -> Thread -> Message` 階層構造が参考になる
