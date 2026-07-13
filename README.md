@@ -1,4 +1,4 @@
-# personacial-log-media
+# personacial-media
 
 ## 目標
 
